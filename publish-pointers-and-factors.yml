@@ -1,0 +1,238 @@
+name: publish-pointers-and-factors
+
+on:
+  push:
+    paths:
+      - 'snapshots/daily/*.csv'
+      - 'swissborg_symbols.txt'
+    paths-ignore:
+      - 'snapshots/daily/latest.csv'
+      - 'snapshots/daily/last_sunday.csv'
+      - 'snapshots/daily/rolling_60d.csv'
+      - 'analytics/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy
+
+      - name: Update pointers and compute factors
+        run: |
+          python - <<'PY'
+          import os, re, shutil, io
+          from datetime import datetime, date, timedelta
+          import pandas as pd
+          import numpy as np
+          from pathlib import Path
+
+          ROOT = Path('.')
+          SNAP_DIR = ROOT / 'snapshots' / 'daily'
+          ANALYTICS_DIR = ROOT / 'analytics'
+          ANALYTICS_DIR.mkdir(parents=True, exist_ok=True)
+
+          # --- helpers ---
+          def parse_date_from_name(p: Path) -> date:
+            # expects YYYY-MM-DD.csv
+            m = re.search(r'(\d{4}-\d{2}-\d{2})\.csv$', p.name)
+            if not m:
+              raise ValueError(f'Unexpected daily filename: {p.name}')
+            return datetime.strptime(m.group(1), '%Y-%m-%d').date()
+
+          def find_cols(df):
+            # symbol column
+            sym_candidates = [c for c in df.columns if c.lower() in ['symbol','ticker','asset','base','coin']]
+            if not sym_candidates:
+              raise ValueError('No symbol column found')
+            sym = sym_candidates[0]
+            # price column
+            price_pref = ['price_usd','close_usd','usd','price','close','last']
+            price_candidates = [c for c in df.columns if c.lower() in price_pref]
+            if not price_candidates:
+              raise ValueError(f'No price column found in {df.columns.tolist()}')
+            price = price_candidates[0]
+            return sym, price
+
+          def rsi(series: pd.Series, period=14):
+            s = series.dropna()
+            if len(s) < period + 1:
+              return np.nan
+            delta = s.diff()
+            up = delta.clip(lower=0.0)
+            down = -delta.clip(upper=0.0)
+            roll_up = up.ewm(alpha=1/period, adjust=False).mean()
+            roll_down = down.ewm(alpha=1/period, adjust=False).mean()
+            rs = roll_up / roll_down
+            return float(100 - (100 / (1 + rs))).iloc[-1]
+
+          def max_drawdown(prices: pd.Series):
+            s = prices.dropna()
+            if len(s) < 2:
+              return np.nan
+            peak = s.cummax()
+            dd = (s / peak) - 1.0
+            return float(dd.min())  # negative number
+
+          # --- list daily files (exclude pointers) ---
+          all_daily = sorted([p for p in SNAP_DIR.glob('*.csv')
+                              if p.name not in {'latest.csv','last_sunday.csv','rolling_60d.csv'}],
+                             key=lambda p: p.name)
+          if not all_daily:
+            raise SystemExit('No daily CSVs found in snapshots/daily')
+
+          # latest and last_sunday pointers
+          latest_file = all_daily[-1]
+          latest_date = parse_date_from_name(latest_file)
+
+          # compute last actual Sunday file (by filename date)
+          sunday_file = None
+          for p in reversed(all_daily):
+            d = parse_date_from_name(p)
+            # Monday=0 ... Sunday=6
+            if d.weekday() == 6:
+              sunday_file = p
+              break
+          if sunday_file is None:
+            # if no Sunday present yet, fallback to latest
+            sunday_file = latest_file
+
+          # write pointers
+          shutil.copyfile(latest_file, SNAP_DIR / 'latest.csv')
+          shutil.copyfile(sunday_file, SNAP_DIR / 'last_sunday.csv')
+
+          # rolling_60d.csv (concat last 60 by date, + add a "date" column)
+          last_60 = all_daily[-60:] if len(all_daily) >= 60 else all_daily
+          frames = []
+          for p in last_60:
+            d = parse_date_from_name(p)
+            df = pd.read_csv(p)
+            df['date'] = pd.to_datetime(d)
+            frames.append(df)
+          rolling = pd.concat(frames, ignore_index=True)
+          # Move 'date' to first column
+          cols = ['date'] + [c for c in rolling.columns if c != 'date']
+          rolling = rolling[cols]
+          rolling.to_csv(SNAP_DIR / 'rolling_60d.csv', index=False)
+
+          # --- build factors_latest.csv ---
+          # Load swissborg symbol universe
+          uni_path = ROOT / 'swissborg_symbols.txt'
+          with open(uni_path, 'r', encoding='utf-8') as f:
+            universe = [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith('#')]
+          universe = set(universe)
+
+          # Normalize rolling to (date, symbol, price_usd)
+          # detect columns from the most recent file to be consistent
+          ref_df = pd.read_csv(latest_file)
+          sym_col, price_col = find_cols(ref_df)
+
+          # Ensure columns exist across rolling
+          if sym_col not in rolling.columns:
+            # try to rename possible candidates to sym_col
+            for c in ['symbol','ticker','asset','base','coin']:
+              if c in rolling.columns:
+                rolling = rolling.rename(columns={c: sym_col})
+                break
+          if price_col not in rolling.columns:
+            for c in ['price_usd','close_usd','usd','price','close','last']:
+              if c in rolling.columns:
+                rolling = rolling.rename(columns={c: price_col})
+                break
+
+          r = rolling[['date', sym_col, price_col]].copy()
+          r = r.rename(columns={sym_col: 'symbol', price_col: 'price_usd'})
+          # Keep only universe
+          r = r[r['symbol'].isin(universe)].copy()
+          r['date'] = pd.to_datetime(r['date']).dt.tz_localize(None)
+
+          # pivot to daily close matrix
+          px = r.pivot_table(index='date', columns='symbol', values='price_usd', aggfunc='last').sort_index()
+
+          # compute daily returns
+          rets = px.pct_change()
+
+          latest_dt = px.index.max()
+          # helper to get T-xd price as-of (use last available <= target)
+          def asof_days(symbol, days):
+            target = latest_dt - pd.Timedelta(days=days)
+            s = px[symbol].dropna()
+            s = s[s.index <= target]
+            if s.empty:
+              return np.nan
+            return float(s.iloc[-1])
+
+          rows = []
+          for sym in px.columns:
+            # skip assets with very little history
+            hist = px[sym].dropna()
+            if len(hist) < 10:
+              continue
+
+            p_now = float(hist.iloc[-1])
+
+            # returns
+            p_7  = asof_days(sym, 7)
+            p_14 = asof_days(sym, 14)
+            p_30 = asof_days(sym, 30)
+
+            ret_7  = (p_now / p_7 - 1.0) if np.isfinite(p_7) else np.nan
+            ret_14 = (p_now / p_14 - 1.0) if np.isfinite(p_14) else np.nan
+            ret_30 = (p_now / p_30 - 1.0) if np.isfinite(p_30) else np.nan
+
+            # vols over trailing window (not annualized)
+            r_sym = rets[sym].dropna()
+            vol_14 = float(r_sym.tail(14).std()) if len(r_sym) >= 5 else np.nan
+            vol_30 = float(r_sym.tail(30).std()) if len(r_sym) >= 10 else np.nan
+
+            # max drawdown 30d on prices
+            px_30 = hist.tail(30)
+            mdd_30 = max_drawdown(px_30)
+
+            # RSI 14
+            rsi_14 = rsi(hist, period=14)
+
+            rows.append({
+              'symbol': sym,
+              'price_usd': p_now,
+              'ret_7d': ret_7,
+              'ret_14d': ret_14,
+              'ret_30d': ret_30,
+              'vol_14d': vol_14,
+              'vol_30d': vol_30,
+              'maxdd_30d': mdd_30,
+              'rsi_14': rsi_14,
+              'last_date': latest_dt.date().isoformat(),
+            })
+
+          fac = pd.DataFrame(rows).sort_values('symbol')
+          fac.to_csv(ANALYTICS_DIR / 'factors_latest.csv', index=False)
+
+          print('Updated:',
+                SNAP_DIR / 'latest.csv',
+                SNAP_DIR / 'last_sunday.csv',
+                SNAP_DIR / 'rolling_60d.csv',
+                ANALYTICS_DIR / 'factors_latest.csv')
+          PY
+
+      - name: Commit pointer & analytics files
+        uses: EndBug/add-and-commit@v9
+        with:
+          author_name: GitHub Actions
+          author_email: actions@github.com
+          message: "chore: update latest/last_sunday/rolling_60d and analytics/factors_latest"
+          add: |
+            snapshots/daily/latest.csv
+            snapshots/daily/last_sunday.csv
+            snapshots/daily/rolling_60d.csv
+            analytics/factors_latest.csv
