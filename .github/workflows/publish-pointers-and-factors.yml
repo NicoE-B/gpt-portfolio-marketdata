@@ -5,16 +5,15 @@ on:
     paths:
       - 'snapshots/daily/*.csv'
       - 'swissborg_symbols.txt'
-    paths-ignore:
-      - 'snapshots/daily/latest.csv'
-      - 'snapshots/daily/last_sunday.csv'
-      - 'snapshots/daily/rolling_60d.csv'
-      - 'analytics/**'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
     steps:
       - uses: actions/checkout@v4
 
@@ -230,7 +229,7 @@ jobs:
         with:
           author_name: GitHub Actions
           author_email: actions@github.com
-          message: "chore: update latest/last_sunday/rolling_60d and analytics/factors_latest"
+          message: "[skip ci] chore: update latest/last_sunday/rolling_60d and analytics/factors_latest"
           add: |
             snapshots/daily/latest.csv
             snapshots/daily/last_sunday.csv
