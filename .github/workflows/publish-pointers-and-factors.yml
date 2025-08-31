@@ -63,17 +63,22 @@ jobs:
             price = price_candidates[0]
             return sym, price
 
-          def rsi(series: pd.Series, period=14):
-            s = series.dropna()
-            if len(s) < period + 1:
-              return np.nan
+          def rsi(series: pd.Series, period: int = 14):
+            s = pd.to_numeric(series, errors='coerce').dropna()
+            if s.size < period + 1:
+                return np.nan
             delta = s.diff()
             up = delta.clip(lower=0.0)
             down = -delta.clip(upper=0.0)
+
             roll_up = up.ewm(alpha=1/period, adjust=False).mean()
-            roll_down = down.ewm(alpha=1/period, adjust=False).mean()
+            roll_down = down.ewm(alpha=1/period, adjust=False).mean().replace(0, np.nan)
+
             rs = roll_up / roll_down
-            return float(100 - (100 / (1 + rs))).iloc[-1]
+            rsi_series = 100 - (100 / (1 + rs))
+            # borne dans [0,100] et retourne le dernier point
+            return float(rsi_series.clip(lower=0, upper=100).iloc[-1])
+
 
           def max_drawdown(prices: pd.Series):
             s = prices.dropna()
@@ -151,7 +156,8 @@ jobs:
                 rolling = rolling.rename(columns={c: price_col})
                 break
 
-          r = rolling[['date', sym_col, price_col]].copy()
+          # r = rolling[['date', sym_col, price_col]].copy()
+          r = rolling[['date', sym_col, price_col]].rename(columns={sym_col:'symbol', price_col:'price_usd'})
           r = r.rename(columns={sym_col: 'symbol', price_col: 'price_usd'})
           # Keep only universe
           r = r[r['symbol'].isin(universe)].copy()
@@ -201,7 +207,11 @@ jobs:
             mdd_30 = max_drawdown(px_30)
 
             # RSI 14
-            rsi_14 = rsi(hist, period=14)
+            # rsi_14 = rsi(hist, period=14)
+            try:
+              rsi_14 = rsi(hist, 14)
+            except Exception:
+              rsi_14 = np.nan
 
             rows.append({
               'symbol': sym,
