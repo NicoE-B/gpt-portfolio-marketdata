@@ -125,11 +125,13 @@ jobs:
           rolling.to_csv(SNAP_DIR / 'rolling_60d.csv', index=False)
 
           # --- build factors_latest.csv ---
-          # Load swissborg symbol universe
+          # Load swissborg symbol universe (supports space- or newline-separated; ignores comments)
+          import re
           uni_path = ROOT / 'swissborg_symbols.txt'
-          with open(uni_path, 'r', encoding='utf-8') as f:
-            universe = [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith('#')]
-          universe = set(universe)
+          uni_text = uni_path.read_text(encoding='utf-8')
+          # Retirer les commentaires (# ...) puis extraire les tokens alphanum ($ autorisé)
+          uni_text = '\n'.join([part.split('#', 1)[0] for part in uni_text.splitlines()])
+          universe = set(re.findall(r'\$?[A-Za-z0-9._-]+', uni_text))
 
           # Normalize rolling to (date, symbol, price_usd)
           # detect columns from the most recent file to be consistent
@@ -215,6 +217,35 @@ jobs:
             })
 
           fac = pd.DataFrame(rows).sort_values('symbol')
+
+          # --- Healthcheck (avant écriture des fichiers) ---
+          errors = []
+
+          # 1) Qualité des données factors
+          if fac.empty or fac.shape[0] < 10:
+              errors.append(f"factors has only {fac.shape[0]} rows")
+          required_cols = {'symbol','price_usd','ret_7d','ret_14d','ret_30d'}
+          missing = required_cols - set(fac.columns)
+          if missing:
+              errors.append(f"factors missing columns: {sorted(missing)}")
+
+          # 2) Matrice de prix (au moins 10 actifs exploitables)
+          if px.shape[1] < 10:
+              errors.append(f"only {px.shape[1]} assets available in price matrix")
+
+          # 3) Extract rolling minimal (colonnes clés présentes)
+          for need in ['symbol','price_usd']:
+              if need not in r.columns:
+                  errors.append(f"missing column in rolling extract: {need}")
+
+          # 4) Valeurs absurdes (prix non positifs)
+          if (fac['price_usd'] <= 0).any():
+              errors.append("non-positive price_usd detected in factors")
+
+          if errors:
+              raise SystemExit("Healthcheck failed: " + " | ".join(map(str, errors)))
+          # --- Fin healthcheck ---
+          
           fac.to_csv(ANALYTICS_DIR / 'factors_latest.csv', index=False)
 
           print('Updated:',
