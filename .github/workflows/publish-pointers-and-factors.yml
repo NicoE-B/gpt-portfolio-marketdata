@@ -1,14 +1,17 @@
 name: publish-pointers-and-factors
 
 on:
-  push:
-    paths:
-      - 'snapshots/daily/*.csv'
-      - 'swissborg_symbols.txt'
+  schedule:
+    - cron: '15 19 * * *'
   workflow_dispatch:
 
 permissions:
   contents: write
+
+# Empêche deux exécutions concurrentes
+concurrency:
+  group: pointers-and-factors-main
+  cancel-in-progress: true
 
 jobs:
   build:
