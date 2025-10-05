@@ -2,7 +2,7 @@ name: publish-pointers-and-factors
 
 on:
   schedule:
-    - cron: '15 18 * * *'
+    - cron: '15 17 * * *'
   workflow_dispatch:
 
 permissions:
