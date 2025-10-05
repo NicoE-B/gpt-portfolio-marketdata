@@ -1,9 +1,9 @@
 {
   "status": {
-    "timestamp": "2025-10-05T17:49:07.898Z",
+    "timestamp": "2025-10-05T17:49:11.024Z",
     "error_code": 0,
     "error_message": null,
-    "elapsed": 103,
+    "elapsed": 84,
     "credit_count": 1,
     "notice": null
   },
@@ -9781,8 +9781,8 @@
         "is_active": 1,
         "infinite_supply": false,
         "cmc_rank": 702,
-        "self_reported_circulating_supply": 98603097.94,
-        "self_reported_market_cap": 73652087.40483709,
+        "self_reported_circulating_supply": 98602536.11,
+        "self_reported_market_cap": 73651667.74305028,
         "tvl_ratio": null,
         "last_updated": "2025-10-05T17:47:00.000Z",
         "quote": {
